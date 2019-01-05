@@ -86,8 +86,8 @@ Peer::send(const Buffer& buffer, int flags) {
 }
 
 std::ostream& operator<<(std::ostream& os, const Peer& peer) {
-    const auto& addr = peer.address();
-    os << "(" << addr.host() << ", " << addr.port() << ") [" << peer.hostname() << "]";
+    const Address& addr = peer.address();
+    os << "(" << addr << ") [" << peer.hostname() << "]";
     return os;
 }
 

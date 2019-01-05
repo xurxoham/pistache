@@ -811,12 +811,5 @@ std::shared_ptr<H> make_handler(Args&& ...args) {
     return std::make_shared<H>(std::forward<Args>(args)...);
 }
 
-namespace helpers
-{
-    inline Address httpAddr(const StringView& view) {
-        auto const str = view.toString();
-        return Address(str);
-        }
-} // namespace helpers
 } // namespace Http
 } // namespace Pistache

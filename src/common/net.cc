@@ -12,21 +12,13 @@
 #include <ifaddrs.h>
 #include <iostream>
 
-#include <pistache/net.h>
 #include <pistache/common.h>
+#include <pistache/net.h>
+#include <pistache/string_view.h>
 
 using namespace std;
 
 namespace Pistache {
-
-Port::Port(uint16_t port)
-    : port(port)
-{ }
-
-bool
-Port::isReserved() const {
-    return port < 1024;
-}
 
 bool
 Port::isUsed() const {
@@ -34,101 +26,28 @@ Port::isUsed() const {
     return false;
 }
 
-std::string
-Port::toString() const {
-    return std::to_string(port);
-}
-
-Ipv4::Ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
-    : a(a)
-    , b(b)
-    , c(c)
-    , d(d)
-{ }
-
-Ipv4
-Ipv4::any() {
-    return Ipv4(0, 0, 0, 0);
-}
-
-Ipv4
-Ipv4::loopback() {
-    return Ipv4(127, 0, 0, 1);
-}
-
-
-std::string
-Ipv4::toString() const {
-    
-    // Use the built-in ipv4 string length from arpa/inet.h
-    char buff[INET_ADDRSTRLEN+1];
-    
-    in_addr_t addr;
-    toNetwork(&addr);
-    
-    // Convert the network format address into display format
-    inet_ntop(AF_INET, &addr, buff, INET_ADDRSTRLEN);
-    
-    return std::string(buff);
-}
-
-void Ipv4::toNetwork(in_addr_t *addr) const {
-    // Bitshift the bytes into an in_addr_t (a single 32bit unsigned int);
-    *addr = htonl( (uint32_t)(a<<24) | (uint32_t)(b<<16) | (uint32_t)(c<<8) | (uint32_t)d );;
-}
-
-Ipv6::Ipv6(uint16_t a, uint16_t b, uint16_t c, uint16_t d, uint16_t e, uint16_t f, uint16_t g, uint16_t h)
-    : a(a)
-    , b(b)
-    , c(c)
-    , d(d)
-    , e(e)
-    , f(f)
-    , g(g)
-    , h(h)
-{ }
-
-Ipv6
-Ipv6::any() {
-    return Ipv6(0, 0, 0, 0, 0, 0, 0, 0);
-}
-
-Ipv6
-Ipv6::loopback() {
-    return Ipv6(0, 0, 0, 0, 0, 0, 0, 1);
-}
-
-std::string
-Ipv6::toString() const {
-    
-    // Use the built-in ipv6 string length from arpa/inet.h
-    char buff6[INET6_ADDRSTRLEN+1];
-    
-    in6_addr addr;
-    toNetwork(&addr);
-    
-    inet_ntop(AF_INET6, &addr, buff6, INET6_ADDRSTRLEN);
-
-    return std::string(buff6);
-}
-
-void Ipv6::toNetwork(in6_addr *addr6) const {
-    uint16_t temp_ip6[8] = {a, b, c, d, e, f, g, h};
-    uint16_t remap_ip6[8] = {0};
-    uint16_t x, y;
-    
-     // If native endianness is little-endian swap the bytes, otherwise just copy them into the new array
-    if ( htonl(1) != 1 ) {
-        for (uint16_t i = 0; i<8; i++) {
-            x = temp_ip6[i];
-            y = htons(x);
-            remap_ip6[i] = y;
-        }
-    } else {
-        memcpy(remap_ip6, temp_ip6, 16);
+Ipv4::Ipv4( std::string_view host ) :
+    address_()
+{
+    // inet_pton expects a NULL-terminated char array
+    std::array<char,INET_ADDRSTRLEN+1> buff;
+    std::copy(host.begin(), host.end(), buff.begin());
+    int err = inet_pton(AF_INET, buff.data(), &address_);
+    if( err == 0 ) {
+        throw std::invalid_argument("Invalid IPv4 address");
     }
-    // Copy the bytes into the in6_addr struct
-    memcpy(addr6->s6_addr16, remap_ip6, 16);
+}
+
+Ipv6::Ipv6( std::string_view host ) :
+    address_()
+{
+    // inet_pton expects a NULL-terminated char array
+    std::array<char,INET6_ADDRSTRLEN+1> buff;
+    std::copy(host.begin(), host.end(), buff.begin());
+    int err = inet_pton(AF_INET6, buff.data(), &address_);
+    if( err == 0 ) {
+        throw std::invalid_argument("Invalid IPv6 address");
+    }
 }
 
 bool Ipv6::supported() {
@@ -157,121 +76,129 @@ bool Ipv6::supported() {
     return supportsIpv6;
 }
 
-Address::Address()
-    : host_("")
-    , port_(0)
-{ }
-
-Address::Address(std::string host, Port port)
-{   
-    std::string addr = host;
-    addr.append(":");
-    addr.append(port.toString());
-    init(std::move(addr));
-}
-
-
-Address::Address(std::string addr)
+// Address constructors
+Address::Address(const sockaddr* addr) :
+    addr_()
 {
-    init(std::move(addr));
-}
-
-Address::Address(const char* addr)
-{
-    init(std::string(addr));
-}
-
-Address::Address(Ipv4 ip, Port port)
-    : host_(ip.toString())
-    , port_(port)
-    , family_(AF_INET)
-{ }
-
-Address::Address(Ipv6 ip, Port port)
-    : host_(ip.toString())
-    , port_(port)
-    , family_(AF_INET6)
-{ }
-
-Address
-Address::fromUnix(struct sockaddr* addr) {
-    if (addr->sa_family == AF_INET) { 
-        struct sockaddr_in *in_addr = reinterpret_cast<struct sockaddr_in *>(addr);
-        char host[INET_ADDRSTRLEN+1];
-        inet_ntop(AF_INET, &(in_addr->sin_addr), host, INET_ADDRSTRLEN);
-        int port = ntohs(in_addr->sin_port);
-        assert(addr);
-        return Address(host, port);
-    } else if (addr->sa_family == AF_INET6) {
-        struct sockaddr_in6 *in_addr = reinterpret_cast<struct sockaddr_in6 *>(addr);
-        char host[INET6_ADDRSTRLEN+1];
-        inet_ntop(AF_INET6, &(in_addr->sin6_addr), host, INET6_ADDRSTRLEN);
-        int port = ntohs(in_addr->sin6_port);
-        assert(addr);
-        return Address(host, port);
+    switch( addr->sa_family ) {
+        case AF_INET: /* Ipv4 */
+            addr_.ipv4 = *reinterpret_cast<const sockaddr_in*>(addr);
+            break;
+        case AF_INET6: /* Ipv6 */
+            addr_.ipv6 = *reinterpret_cast<const sockaddr_in6*>(addr);
+            break;
+        case AF_UNIX: /* Unix */
+            addr_.unix = *reinterpret_cast<const sockaddr_un*>(addr);
+            break;
+        default:
+            throw Error("Adress family not supported");
     }
-    throw Error("Not an IP socket");    
+}
+
+Address Address::UnixAddress(const std::string& path)
+{
+    SocketAddress addr;
+    addr.unix = sockaddr_un{ AF_UNIX, {0} };
+    std::copy( path.begin(), path.end(), addr.unix.sun_path );
+    return Address( &addr.generic );
+}
+
+Address Address::NetworkAddress(const Ipv4& ip, Port port)
+{
+    SocketAddress addr;
+    addr.ipv4 = sockaddr_in{ AF_INET,    // sin_family
+          static_cast<in_port_t>(port), // sin_port
+          static_cast<in_addr>(ip) };    // sin_addr
+    return Address( &addr.generic );
+}
+
+Address Address::NetworkAddress(const Ipv6& ip, Port port)
+{
+    SocketAddress addr;
+    addr.ipv6 = sockaddr_in6{ AF_INET6, // sin6_family
+          static_cast<in_port_t>(port), // sin6_port
+          0, // sin6_flowinfo
+          static_cast<in6_addr>(ip), // sin6_addr
+          0 }; // sin6_scope_id
+    return Address( &addr.generic );
 }
 
 std::string
 Address::host() const {
-    return host_;
+    int err = 0;
+    char host[NI_MAXHOST];
+    switch( addr_.generic.sa_family ) {
+        case AF_INET:
+        case AF_INET6:
+            err = getnameinfo(&addr_.generic, sizeof(sockaddr_storage),
+                    host, sizeof(host), nullptr, 0, 
+                    NI_NUMERICHOST);
+            if( err ) {
+                throw AddrResolutionError(err);
+            }
+            return std::string(host);
+        case AF_UNIX:
+        default:
+            return std::string();
+    };
 }
 
-Port
+std::pair<bool,Port>
 Address::port() const {
-    return port_;
+    switch( addr_.generic.sa_family ) {
+        case AF_INET:
+            return {true, Port(addr_.ipv4.sin_port)};
+        case AF_INET6:
+            return {true, Port(addr_.ipv6.sin6_port)};
+        case AF_UNIX:
+        default:
+            return {false, Port()};
+    };
 }
 
-int
+
+
+Address::Family
 Address::family() const {
-    return family_;
+    switch( addr_.generic.sa_family ) {
+        case AF_INET:  return Family::IPv4;
+        case AF_INET6: return Family::IPv6;
+        case AF_UNIX:  return Family::Unix;
+        default:
+            assert( 0 && "Unexpected socket address family" );
+    }
 }
 
-void
-Address::init(const std::string& addr) {
-    unsigned long pos = addr.find(']');
-    unsigned long s_pos = addr.find('[');
-    if (pos != std::string::npos && s_pos != std::string::npos) {
+Address Address::NetworkAddress( std::string_view addr ) {
+    using size_type = std::string_view::size_type;
+
+    size_type port_pos = addr.rfind(':');
+    size_type ipv6_beg = addr.find('[', port_pos);
+    size_type ipv6_end = addr.find(']');
+
+    // Parse port
+    long port = 0;
+    char* end = 0;
+    if( port_pos != std::string_view::npos ) {
+        port = strtol(&addr[port_pos+1], &end, 10);
+    }
+    if (*end != '\0' || port < Port::min() || port > Port::max()) {
+        throw std::invalid_argument("Invalid port");
+    }
+
+    // Parse IP address
+    if (ipv6_beg != std::string::npos && ipv6_end != std::string::npos) {
         //IPv6 address
-        host_ = addr.substr(s_pos+1, pos-1);
-        family_ = AF_INET6;
-        try {
-            in6_addr addr6;
-            char buff6[INET6_ADDRSTRLEN+1];
-            memcpy(buff6, host_.c_str(), INET6_ADDRSTRLEN);
-            inet_pton(AF_INET6, buff6, &(addr6.s6_addr16));
-        } catch (std::runtime_error) {
-            throw std::invalid_argument("Invalid IPv6 address");
-        }
-        pos++;
+        std::string_view host = std::string_view(&addr[ipv6_beg+1],ipv6_end-ipv6_beg);
+        return NetworkAddress( Ipv6(host), Port(port) );
     } else {
         //IPv4 address
-        pos = addr.find(':');
-        if (pos == std::string::npos)
-            throw std::invalid_argument("Invalid address");
-        host_ = addr.substr(0, pos);
-        family_ = AF_INET;
-        if (host_ == "*") {
-            host_ = "0.0.0.0";
-        }
-        try {
-            in_addr addr;
-            char buff[INET_ADDRSTRLEN+1];
-            memcpy(buff, host_.c_str(), INET_ADDRSTRLEN);
-            inet_pton(AF_INET, buff, &(addr));
-        } catch (std::runtime_error) {
-            throw std::invalid_argument("Invalid IPv4 address");
-        }
+        std::string_view host = std::string_view(addr.begin(), port_pos);
+        Ipv4 addr = Ipv4::any();
+        if( host != "*" )
+            addr = Ipv4(host);
+        return NetworkAddress( addr, Port(port) );
     }
-    char *end;
-    const std::string portPart = addr.substr(pos + 1);
-    if (portPart.empty())
-        throw std::invalid_argument("Invalid port");
-    long port = strtol(portPart.c_str(), &end, 10);
-    if (*end != 0 || port < Port::min() || port > Port::max())
-        throw std::invalid_argument("Invalid port");
-    port_ = static_cast<uint16_t>(port);
 }
 
 Error::Error(const char* message)
@@ -292,6 +219,27 @@ Error::system(const char* message) {
 
     return Error(std::move(str));
 
+}
+
+std::string to_string( const Ipv4& address ) {
+    in_addr_t addr = static_cast<in_addr>(address).s_addr;
+    // Use the built-in ipv4 string length from arpa/inet.h
+    std::array<char,INET_ADDRSTRLEN+1> buff;
+
+    // Convert the network format address into display format
+    inet_ntop(AF_INET, &addr, buff.data(), buff.size()-1);
+
+    return std::string(buff.data());
+}
+
+std::string to_string( const Ipv6& address ) {
+    in6_addr addr = address;
+    // Use the built-in ipv6 string length from arpa/inet.h
+    std::array<char,INET6_ADDRSTRLEN+1> buff;
+
+    inet_ntop(AF_INET6, &addr, buff.data(), buff.size()-1);
+
+    return std::string(buff.data());
 }
 
 } // namespace Pistache

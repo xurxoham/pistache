@@ -6,12 +6,15 @@
 
 #pragma once
 
-#include <string>
+#include <algorithm>
+#include <array>
 #include <cstring>
-#include <stdexcept>
 #include <limits>
+#include <stdexcept>
+#include <string>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 
 #include <pistache/common.h>
 
@@ -26,51 +29,21 @@
 
 namespace Pistache {
 
-// Wrapper around 'getaddrinfo()' that handles cleanup on destruction.
-class AddrInfo {
-public:
-    // Disable copy and assign.
-    AddrInfo(const AddrInfo &) = delete;
-    AddrInfo& operator=(const AddrInfo &) = delete;
-
-    // Default construction: do nothing.
-    AddrInfo() : addrs(nullptr) {}
-
-    ~AddrInfo() {
-        if (addrs) {
-            ::freeaddrinfo(addrs);
-        }
-    }
-
-    // Call "::getaddrinfo()", but stash result locally.  Takes the same args
-    // as the first 3 args to "::getaddrinfo()" and returns the same result.
-    int invoke(const char *node, const char *service,
-               const struct addrinfo *hints) {
-        if (addrs) {
-            ::freeaddrinfo(addrs);
-            addrs = nullptr;
-        }
-
-        return ::getaddrinfo(node, service, hints, &addrs);
-    }
-
-    const struct addrinfo *get_info_ptr() const {
-        return addrs;
-    }
-
-private:
-    struct addrinfo *addrs;
-};
-
 class Port {
 public:
-    Port(uint16_t port = 0);
+    Port(uint16_t port = 0) :
+        port(port)
+    {
+    }
 
     operator uint16_t() const { return port; }
 
-    bool isReserved() const;
+    bool isReserved() const {
+        return port < 1024;
+    }
+
+    // Should not be implemented. See https://stackoverflow.com/a/10294941/5809597
     bool isUsed() const;
-    std::string toString() const;
 
     static constexpr uint16_t min() {
         return std::numeric_limits<uint16_t>::min();
@@ -85,70 +58,122 @@ private:
 
 class Ipv4 {
 public:
-    Ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+    constexpr Ipv4( in_addr_t addr ) :
+        address_({addr})
+    {
+    }
 
-    static Ipv4 any();
-    static Ipv4 loopback();
-    std::string toString() const;
-    void toNetwork(in_addr_t*) const;
+    explicit Ipv4( std::string_view host );
+
+    Ipv4( std::array<uint8_t,4> bytes ) :
+        address_({htonl(0
+            + (static_cast<uint32_t>(bytes[3]) << 24)
+            + (static_cast<uint32_t>(bytes[2]) << 16)
+            + (static_cast<uint32_t>(bytes[1]) <<  8)
+            + (static_cast<uint32_t>(bytes[0])))
+        })
+    {
+    }
+
+    Ipv4(const Ipv4&) = default;
+    Ipv4& operator=(const Ipv4&) = default;
+
+    operator in_addr() const { return address_; }
+
+    static constexpr Ipv4 any() { return INADDR_ANY; }
+    static constexpr Ipv4 loopback() { return INADDR_LOOPBACK; }
 
 private:
-    uint8_t a;
-    uint8_t b;
-    uint8_t c;
-    uint8_t d;
+    in_addr address_;
 };
 
 class Ipv6 {
 public:
-    Ipv6(uint16_t a, uint16_t b, uint16_t c, uint16_t d, uint16_t e, uint16_t f, uint16_t g, uint16_t h);
+    constexpr Ipv6( in6_addr addr ) :
+        address_(addr)
+    {
+    }
 
-    static Ipv6 any();
-    static Ipv6 loopback();
+    explicit Ipv6( std::string_view host );
 
-    std::string toString() const;
-    void toNetwork(in6_addr*) const;
+    explicit Ipv6( std::array<uint16_t,4> bytes ) :
+        address_()
+    {
+        std::transform(bytes.begin(), bytes.end(), address_.s6_addr16,
+            []( uint16_t val ) { return htons(val); });
+    }
+
+    explicit Ipv6( std::array<uint8_t,8> bytes ) :
+        address_()
+    {
+        std::copy(bytes.begin(), bytes.end(), address_.s6_addr);
+    }
+
+    Ipv6(const Ipv6&) = default;
+    Ipv6& operator=(const Ipv6&) = default;
+
+    operator in6_addr () const;
 
     // Returns 'true' if the kernel/libc support IPV6, false if not.
     static bool supported();
 
+    static constexpr Ipv6 any() { return IN6ADDR_ANY_INIT; }
+    static constexpr Ipv6 loopback() { return IN6ADDR_LOOPBACK_INIT; }
+
 private:
-    uint16_t a;
-    uint16_t b;
-    uint16_t c;
-    uint16_t d;
-    uint16_t e;
-    uint16_t f;
-    uint16_t g;
-    uint16_t h;
+    in6_addr address_;
 };
 
 class Address {
 public:
-    Address();
-    Address(std::string host, Port port);
-    Address(std::string addr);
-    Address(const char* addr);
-    Address(Ipv4 ip, Port port);
-    Address(Ipv6 ip, Port port);
+    enum class Family {
+        IPv4,
+        IPv6,
+        Unix
+    };
 
     Address(const Address& other) = default;
-    Address(Address&& other) = default;
-
     Address &operator=(const Address& other) = default;
-    Address &operator=(Address&& other) = default;
 
-    static Address fromUnix(struct sockaddr *addr);
+    Family family() const;
 
+    const sockaddr& native_handle() const { return addr_.generic; }
+
+    // Network address host. Returns empty string if not a network address.
     std::string host() const;
-    Port port() const;
-    int family() const;
+
+    // Returns {true,port} if a network address. Otherwise {false,unspecified}.
+    std::pair<bool,Port> port() const;
+
+    // Unix socket file path. Valid for unix addresses only. Otherwise an empty
+    // string is returned.
+    std::string path() const;
+
+    // Parses an IP address (Ipv4/Ipv6) and port pair from text
+    static Address NetworkAddress(std::string_view addr);
+
+    // Constructs a IPv6 socket address
+    static Address NetworkAddress(const Ipv4& ip, Port port);
+
+    // Constructs a IPv4 socket address
+    static Address NetworkAddress(const Ipv6& ip, Port port);
+
+    // Constructs a Unix socket address from a file path
+    static Address UnixAddress(const std::string& path);
 
 private:
-    void init(const std::string& addr);
-    std::string host_;
-    Port port_;
-    int family_ = AF_INET;
+    // Constructs an address from an existing socket address
+    explicit Address(const sockaddr* socket_addr);
+
+    union SocketAddress {
+        sockaddr         generic;
+        sockaddr_in      ipv4;
+        sockaddr_in6     ipv6;
+        sockaddr_un      unix;
+        sockaddr_storage storage;
+    };
+
+    SocketAddress addr_;
 };
 
 class Error : public std::runtime_error {
@@ -158,8 +183,108 @@ public:
     static Error system(const char* message);
 };
 
+// Exception generated from getaddrinfo and getnameinfo errors
+class AddrResolutionError : public std::runtime_error {
+public:
+    AddrResolutionError( int code ) :
+        std::runtime_error(message(code))
+    {
+    }
+
+private:
+    static std::string message( int code ) {
+        std::string msg("Address resolution failed: ");
+        msg += gai_strerror(code);
+        return msg;
+    }
+};
+
+// Wrapper around 'getaddrinfo()' that handles cleanup on destruction.
+class AddrInfo {
+public:
+    class iterator {
+    public:
+        iterator() :
+            ai(nullptr)
+        {
+        }
+
+        iterator( const iterator& other ) :
+            ai(other.ai)
+        {
+        }
+
+        explicit iterator( const addrinfo* ptr ) :
+            ai(ptr)
+        {
+        }
+
+        const addrinfo* operator->() { return ai; }
+        const addrinfo& operator*() { return *ai; }
+
+        iterator operator++(int) {
+            iterator it(ai);
+            ai = ai->ai_next;
+            return it;
+        }
+
+        iterator& operator++() {
+            ai = ai->ai_next;
+            return *this;
+        }
+
+    private:
+        const addrinfo *ai;
+    };
+
+    // Default constructor: sets an empty addrinfo
+    AddrInfo() :
+        addrs(nullptr)
+    {
+    }
+
+    // AddrInfo constructor: calls getaddrinfo and stores result pointer locally
+    AddrInfo( const char *node, const char *service, const addrinfo *hints ) :
+        addrs(nullptr)
+    {
+        int err = ::getaddrinfo(node, service, hints, &addrs);
+        if( err ) {
+            throw AddrResolutionError(err);
+        }
+    }
+
+    ~AddrInfo() {
+        if (addrs) {
+            ::freeaddrinfo(addrs);
+        }
+    }
+
+    // Disable copy and copy assignment
+    AddrInfo(const AddrInfo &) = delete;
+    AddrInfo& operator=(const AddrInfo &) = delete;
+
+    // Move constructor
+    AddrInfo( AddrInfo&& other ) :
+        addrs(other.addrs)
+    {
+        other.addrs = nullptr;
+    }
+
+    // Move-assignment operator
+    AddrInfo& operator=( AddrInfo&& other ) {
+        std::swap( addrs, other.addrs );
+        return *this;
+    }
+
+    iterator begin() const { return iterator(addrs); }
+    iterator end()   const { return iterator(); }
+
+private:
+    struct addrinfo *addrs;
+};
+
 template<typename T>
-struct Size { };
+struct Size;
 
 template<typename T>
 size_t
@@ -184,7 +309,6 @@ struct Size<const char*> {
 template<size_t N>
 struct Size<char[N]> {
     constexpr size_t operator()(const char (&)[N]) const {
-
         // We omit the \0
         return N - 1;
     }
@@ -221,4 +345,16 @@ struct Size<char> {
     }
 };
 
+// Converts an Ipv4 address to a human readable representation
+std::string
+to_string( const Ipv4& );
+
+// Converts an Ipv6 address to a human readable representation
+std::string
+to_string( const Ipv6& );
+
+// Writes a text representation of Address into an output stream
+std::ostream operator<< (std::ostream& os, const Address& addr );
+
 } // namespace Pistache
+
